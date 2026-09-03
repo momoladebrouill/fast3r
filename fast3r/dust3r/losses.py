@@ -25,6 +25,14 @@ from dust3r.utils.geometry import (
 )
 
 
+def safe_norm(x, eps=1e-8):
+    """Stable vector norm: sqrt(sum(x^2) + eps) along last dim."""
+    # sanitize non-finite values to avoid NaNs/Infs propagating into sqrt
+    x = torch.nan_to_num(x, nan=0.0, posinf=1e8, neginf=-1e8)
+    x = x.float().clamp(min=-1e6, max=1e6)
+    return torch.sqrt(x.pow(2).sum(dim=-1).add(eps))
+
+
 def Sum(*losses_and_masks):
     if len(losses_and_masks[0]) == 2:
         loss, mask = losses_and_masks[0]
@@ -184,8 +192,8 @@ class Regr3D(Criterion, MultiLoss):
 
         if dist_clip is not None:
             # points that are too far-away == invalid
-            dis1 = gt_pts1.norm(dim=-1)  # (B, H, W)
-            dis2 = gt_pts2.norm(dim=-1)  # (B, H, W)
+            dis1 = safe_norm(gt_pts1)  # (B, H, W)
+            dis2 = safe_norm(gt_pts2)  # (B, H, W)
             valid1 = valid1 & (dis1 <= dist_clip)
             valid2 = valid2 & (dis2 <= dist_clip)
 
@@ -247,8 +255,8 @@ class Regr3DMultiview(Criterion, MultiLoss):
 
         if dist_clip is not None:
             # points that are too far-away == invalid
-            dis1 = gt_pts1.norm(dim=-1)  # (B, H, W)
-            dis_other = gt_pts_other.norm(dim=-1)  # (B, H, W)
+            dis1 = safe_norm(gt_pts1)  # (B, H, W)
+            dis_other = safe_norm(gt_pts_other)  # (B, H, W)
             valid1 = valid1 & (dis1 <= dist_clip)
             valid_other = valid_other & (dis_other <= dist_clip)
 
@@ -318,7 +326,7 @@ class Regr3DMultiviewV2(Criterion, MultiLoss):
 
             if dist_clip is not None:
                 # Remove points that are too far away
-                dis = gt_pts.norm(dim=-1)
+                dis = safe_norm(gt_pts)
                 valid_gt &= dis <= dist_clip
 
             pr_pts = pred_view["pts3d_in_other_view"]  # Simplified for this use case
@@ -349,8 +357,27 @@ class Regr3DMultiviewV2(Criterion, MultiLoss):
         else:
             valid_pts = all_pts
 
-        # Compute the distance to the origin for valid points
-        dis = valid_pts.norm(dim=-1)
+        # If there are no valid points, return inputs unchanged
+        if valid_pts.numel() == 0:
+            return pts_list
+
+        # sanitize NaNs/Infs that may appear and compute the distance to the origin
+        if not torch.isfinite(valid_pts).all():
+            n_nan = torch.isnan(valid_pts).sum().item()
+            n_inf = torch.isinf(valid_pts).sum().item()
+            try:
+                vmin = float(valid_pts.nanmin())
+                vmax = float(valid_pts.nanmax())
+            except Exception:
+                vmin = vmax = float('nan')
+            n_views = len(pts_list)
+            print(
+                f"[DEBUG] normalize_pointcloud_from_views: views={n_views} all_pts_shape={all_pts.shape} non-finite valid_pts n_nan={n_nan} n_inf={n_inf} min={vmin} max={vmax}"
+            )
+            valid_pts = torch.nan_to_num(valid_pts, nan=0.0, posinf=1e8, neginf=-1e8)
+
+        valid_pts = valid_pts.float().clamp(min=-1e6, max=1e6)
+        dis = safe_norm(valid_pts)
 
         # Apply distance transformation based on dis_mode
         if dis_mode == "dis":
@@ -436,7 +463,7 @@ class Regr3DMultiviewV3(Criterion, MultiLoss):
             valid_gt = gt_view["valid_mask"].clone()
 
             if dist_clip is not None:
-                dis = gt_pts.norm(dim=-1)
+                dis = safe_norm(gt_pts)
                 valid_gt &= dis <= dist_clip
 
             gt_pts_list.append(gt_pts)
@@ -459,8 +486,14 @@ class Regr3DMultiviewV3(Criterion, MultiLoss):
         else:
             valid_pts = all_pts
 
-        # Compute the distance to the origin for valid points
-        dis = valid_pts.norm(dim=-1)
+        # If there are no valid points, return inputs unchanged
+        if valid_pts.numel() == 0:
+            return pts_list
+
+        # sanitize NaNs/Infs that may appear and compute the distance to the origin
+        valid_pts = torch.nan_to_num(valid_pts, nan=0.0, posinf=1e8, neginf=-1e8)
+        valid_pts = valid_pts.float().clamp(min=-1e6, max=1e6)
+        dis = safe_norm(valid_pts)
 
         # Apply distance transformation based on dis_mode
         if dis_mode == "dis":
@@ -496,13 +529,21 @@ class Regr3DMultiviewV3(Criterion, MultiLoss):
         norm_mode, dis_mode = norm_mode.split("_")
 
         normed_pts_list = []
-        for pts, valid in zip(pts_list, valid_list):
+        for i, (pts, valid) in enumerate(zip(pts_list, valid_list)):
             if valid is not None:
                 valid_pts = pts[valid]
             else:
                 valid_pts = pts
 
-            dis = valid_pts.norm(dim=-1)
+            # If there are no valid points for this view, keep pts unchanged
+            if valid_pts.numel() == 0:
+                normed_pts_list.append(pts)
+                continue
+
+            # sanitize NaNs/Infs that may appear and compute the distance
+            valid_pts = torch.nan_to_num(valid_pts, nan=0.0, posinf=1e8, neginf=-1e8)
+            valid_pts = valid_pts.float().clamp(min=-1e6, max=1e6)
+            dis = safe_norm(valid_pts)
 
             # Apply distance transformation based on dis_mode
             if dis_mode == "dis":
@@ -603,7 +644,7 @@ class Regr3DMultiviewV4(Criterion, MultiLoss):
             valid_gt = gt_view["valid_mask"].clone()
 
             if dist_clip is not None:
-                dis = gt_pts.norm(dim=-1)
+                dis = safe_norm(gt_pts)
                 valid_gt &= dis <= dist_clip
 
             gt_pts_list.append(gt_pts)
@@ -629,7 +670,8 @@ class Regr3DMultiviewV4(Criterion, MultiLoss):
         valid_pts = all_pts
 
         # Compute the distance to the origin for valid points
-        dis = valid_pts.norm(dim=-1)
+        # use safe_norm to avoid zero-norm singularities
+        dis = safe_norm(valid_pts)
 
         # Apply distance transformation based on dis_mode
         if dis_mode == "dis":
@@ -671,7 +713,43 @@ class Regr3DMultiviewV4(Criterion, MultiLoss):
             if valid is not None:
                 valid = valid.view(valid.shape[0], -1)
                 valid_pts[valid == 0] = float('nan') # mask out invalid with nan
-            dis = valid_pts.norm(dim=-1)
+
+            # Exclude non-finite points (NaN/Inf) from the valid mask so they
+            # don't contribute to normalization. Mark them invalid.
+            finite_mask = torch.isfinite(valid_pts).all(dim=-1)
+            if valid is not None:
+                # count newly non-finite among previously valid points (for debugging)
+                newly_nonfinite = ((~finite_mask) & (valid == 1)).sum().item()
+                if newly_nonfinite > 0:
+                    print(f"[DEBUG] normalize_pointcloud_per_view: marking {newly_nonfinite} previously-valid non-finite points as invalid")
+                valid = valid & finite_mask
+            else:
+                valid = finite_mask
+
+            # Ensure invalid positions contain NaN so subsequent sanitization handles them
+            valid_pts[valid == 0] = float('nan')
+
+            # If there are no valid points for this view, keep pts unchanged
+            if valid_pts.numel() == 0:
+                normed_pts_list.append(pts)
+                continue
+
+            # sanitize NaNs/Infs before computing norm
+            if not torch.isfinite(valid_pts).all():
+                n_nan = torch.isnan(valid_pts).sum().item()
+                n_inf = torch.isinf(valid_pts).sum().item()
+                try:
+                    vmin = float(valid_pts.nanmin())
+                    vmax = float(valid_pts.nanmax())
+                except Exception:
+                    vmin = vmax = float('nan')
+                print(
+                    f"[DEBUG] normalize_pointcloud_per_view: pts_shape={pts.shape} valid_shape={None if valid is None else valid.shape} non-finite valid_pts n_nan={n_nan} n_inf={n_inf} min={vmin} max={vmax}"
+                )
+                valid_pts = torch.nan_to_num(valid_pts, nan=0.0, posinf=1e8, neginf=-1e8)
+
+            valid_pts = valid_pts.float().clamp(min=-1e6, max=1e6)
+            dis = safe_norm(valid_pts)
 
             # Apply distance transformation based on dis_mode
             if dis_mode == "dis":
@@ -708,6 +786,18 @@ class Regr3DMultiviewV4(Criterion, MultiLoss):
         gt_pts_list, pr_pts_list, valid_mask_list = self.get_pts3d_from_views(gts, preds, **kw)
 
         if self.norm_mode:
+            # Debug: check pr_pts_list and gt_pts_list for non-finite values before global normalization
+            for idx, pts in enumerate(pr_pts_list):
+                if not torch.isfinite(pts).all():
+                    n_nan = torch.isnan(pts).sum().item()
+                    n_inf = torch.isinf(pts).sum().item()
+                    print(f"[DEBUG] pre-global-normalize pr_pts_list view={idx} shape={pts.shape} n_nan={n_nan} n_inf={n_inf}")
+            for idx, pts in enumerate(gt_pts_list):
+                if not torch.isfinite(pts).all():
+                    n_nan = torch.isnan(pts).sum().item()
+                    n_inf = torch.isinf(pts).sum().item()
+                    print(f"[DEBUG] pre-global-normalize gt_pts_list view={idx} shape={pts.shape} n_nan={n_nan} n_inf={n_inf}")
+
             pr_pts_list, pr_norm_factor  = self.normalize_pointcloud_from_views(pr_pts_list, self.norm_mode, valid_mask_list)
             if not self.gt_scale:
                 gt_pts_list, gt_norm_factor = self.normalize_pointcloud_from_views(gt_pts_list, self.norm_mode, valid_mask_list)
@@ -724,6 +814,13 @@ class Regr3DMultiviewV4(Criterion, MultiLoss):
             gt_pts_list_local, pr_pts_list_local, valid_mask_list_local = self.get_pts3d_from_views(gts, preds, local=True, **kw)
 
             if not self.local_scale_consistent or not self.norm_mode:
+                # Debug: check pr_pts_list_local for non-finite values before local normalization
+                for idx, pts in enumerate(pr_pts_list_local):
+                    if not torch.isfinite(pts).all():
+                        n_nan = torch.isnan(pts).sum().item()
+                        n_inf = torch.isinf(pts).sum().item()
+                        print(f"[DEBUG] pre-local-normalize pr_pts_list_local view={idx} shape={pts.shape} n_nan={n_nan} n_inf={n_inf}")
+
                 # Normalize per-view for local coordinate system
                 pr_pts_list_local = self.normalize_pointcloud_per_view(pr_pts_list_local, self.norm_mode, valid_mask_list_local)
                 if not self.gt_scale:

@@ -31,7 +31,7 @@ class Co3d_Multiview(BaseStereoViewDataset):
         # Load all scenes
         with open(osp.join(self.ROOT, f"selected_seqs_{self.split}.json"), "r") as f:
             self.scenes = json.load(f)
-            self.scenes = {k: v for k, v in self.scenes.items() if len(v) > 0}
+            self.scenes = {k: v for k, v in self.scenes.items() if len(v) > 0} # garder que les listes non vides
             # TODO: cap to use only a subset of the scenes based on the data_scaling
             if self.data_scaling < 1.0:
                 for obj in self.scenes.keys():

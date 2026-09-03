@@ -99,7 +99,28 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if cfg.get("train"):
         log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+        # Handle older checkpoints that were not saved with pytorch-lightning metadata.
+        # If checkpoint lacks 'pytorch-lightning_version', load weights manually
+        # into the model and avoid passing ckpt_path to Trainer (prevents PL from migrating).
+        ckpt_path = cfg.get("ckpt_path")
+        if ckpt_path:
+            try:
+                ckpt = torch.load(ckpt_path, map_location="cpu")
+                if isinstance(ckpt, dict) and "pytorch-lightning_version" not in ckpt:
+                    log.info("Checkpoint missing 'pytorch-lightning_version'; loading weights manually.")
+                    if "state_dict" in ckpt:
+                        state = ckpt["state_dict"]
+                    elif "model_state_dict" in ckpt:
+                        state = ckpt["model_state_dict"]
+                    else:
+                        # assume the checkpoint is already a state dict
+                        state = ckpt
+                    model.load_state_dict(state, strict=False)
+                    ckpt_path = None
+            except Exception as e:
+                log.warning(f"Failed to load checkpoint manually: {e}")
+
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
 
     train_metrics = trainer.callback_metrics
 
